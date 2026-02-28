@@ -51,6 +51,9 @@ extension VocabularyRescorer {
         let spanIndices: [Int]
         let spanStartTime: Double
         let spanEndTime: Double
+        /// Average TDT decoder confidence for the original word(s).
+        /// Used by the confidence gate to resist replacing high-confidence transcriptions.
+        let avgConfidence: Float
     }
 
     /// Result of CTC match evaluation.
@@ -335,6 +338,12 @@ extension VocabularyRescorer {
                 let spanStartTime = wordTimings[wordIdx].startTime
                 let spanEndTime = wordTimings[wordIdx + spanLength - 1].endTime
 
+                // Compute average confidence across the span
+                let spanAvgConfidence: Float = {
+                    let confidences = spanIndices.map { wordTimings[$0].avgConfidence }
+                    return confidences.reduce(0, +) / Float(confidences.count)
+                }()
+
                 // Evaluate CTC match using shared helper
                 let matchCandidate = CTCMatchCandidate(
                     originalPhrase: originalPhrase,
@@ -344,7 +353,8 @@ extension VocabularyRescorer {
                     spanLength: spanLength,
                     spanIndices: spanIndices,
                     spanStartTime: spanStartTime,
-                    spanEndTime: spanEndTime
+                    spanEndTime: spanEndTime,
+                    avgConfidence: spanAvgConfidence
                 )
 
                 let result = evaluateCTCMatch(
@@ -500,6 +510,12 @@ extension VocabularyRescorer {
                         let spanStartTime = wordTimings[firstIdx].startTime
                         let spanEndTime = wordTimings[lastIdx].endTime
 
+                        // Compute average confidence across the span
+                        let spanAvgConfidence: Float = {
+                            let confidences = spanIndices.map { wordTimings[$0].avgConfidence }
+                            return confidences.reduce(0, +) / Float(confidences.count)
+                        }()
+
                         // Evaluate CTC match using shared helper
                         let matchCandidate = CTCMatchCandidate(
                             originalPhrase: tdtPhrase,
@@ -509,7 +525,8 @@ extension VocabularyRescorer {
                             spanLength: spanLength,
                             spanIndices: spanIndices,
                             spanStartTime: spanStartTime,
-                            spanEndTime: spanEndTime
+                            spanEndTime: spanEndTime,
+                            avgConfidence: spanAvgConfidence
                         )
 
                         let result = evaluateCTCMatch(
@@ -666,6 +683,12 @@ extension VocabularyRescorer {
                     let spanStartTime = wordTimings[wordIdx].startTime
                     let spanEndTime = wordTimings[wordIdx + matchedSpanLength - 1].endTime
 
+                    // Compute average confidence across the span
+                    let spanAvgConfidence: Float = {
+                        let confidences = spanIndices.map { wordTimings[$0].avgConfidence }
+                        return confidences.reduce(0, +) / Float(confidences.count)
+                    }()
+
                     // Evaluate CTC match using shared helper
                     let matchCandidate = CTCMatchCandidate(
                         originalPhrase: originalPhrase,
@@ -675,7 +698,8 @@ extension VocabularyRescorer {
                         spanLength: matchedSpanLength,
                         spanIndices: spanIndices,
                         spanStartTime: spanStartTime,
-                        spanEndTime: spanEndTime
+                        spanEndTime: spanEndTime,
+                        avgConfidence: spanAvgConfidence
                     )
 
                     let result = evaluateCTCMatch(
