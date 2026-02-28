@@ -8,7 +8,7 @@ import Foundation
 /// ## Similarity Threshold Hierarchy
 /// The similarity thresholds form a hierarchy from lenient to strict:
 /// ```
-/// 0.50 (floor) < 0.52 (default) < 0.55 (single-word) < 0.65 (alias) < 0.75 (length-ratio) < 0.80 (multi-word/short) < 0.85 (stopword)
+/// 0.60 (floor) < 0.65 (large-vocab) < 0.75 (length-ratio) < 0.80 (multi-word/short) < 0.85 (stopword)
 /// ```
 public enum ContextBiasingConstants {
 
@@ -83,10 +83,10 @@ public enum ContextBiasingConstants {
     /// No replacement is considered if string similarity falls below this floor.
     /// Uses Levenshtein-based similarity: 1 - (editDistance / maxLength).
     ///
-    /// - Value: `0.50` (50% character overlap required)
-    /// - Example: "nvidia" vs "nvida" = 0.83 ✓, "nvidia" vs "intel" = 0.17 ✗
-    /// - Used in: Debug logging, BK-tree candidate filtering
-    public static let minSimilarityFloor: Float = 0.50
+    /// - Value: `0.60` (60% character overlap required)
+    /// - Example: "nvidia" vs "nvida" = 0.83 ✓, "phrases" vs "Shraey" = 0.57 ✗
+    /// - Used in: `ctcTokenRescore()` default parameter, BK-tree candidate filtering
+    public static let minSimilarityFloor: Float = 0.60
 
     /// Default minimum similarity for vocabulary term matching.
     ///
@@ -199,7 +199,7 @@ public enum ContextBiasingConstants {
     public static func rescorerConfig(forVocabSize size: Int) -> VocabSizeConfig {
         let isLarge = size > largeVocabThreshold
         return VocabSizeConfig(
-            minSimilarity: isLarge ? 0.60 : 0.50,
+            minSimilarity: isLarge ? 0.65 : 0.60,
             cbw: isLarge ? 2.5 : 3.0
         )
     }
@@ -279,4 +279,35 @@ public enum ContextBiasingConstants {
     /// - Value: `3` (up to 3 character insertions/deletions/substitutions)
     /// - Used in: `VocabularyRescorer+CandidateMatching.swift` BK-tree queries
     public static let bkTreeMaxDistance: Int = 3
+
+    // MARK: - TDT Confidence Gate
+
+    /// When the TDT decoder is highly confident in its transcription, require
+    /// a larger CTC score margin before allowing vocabulary replacement.
+    /// This prevents replacing words like "three" or "phrases" that the decoder
+    /// transcribed with near-perfect confidence.
+    ///
+    /// Tiers:
+    /// - conf >= 0.95: margin 6.0 (very confident, strong resistance)
+    /// - conf >= 0.85: margin 3.0 (confident, moderate resistance)
+    /// - conf >= 0.70: margin 1.0 (moderate, light resistance)
+    /// - conf <  0.70: margin 0.0 (uncertain, no resistance — boosting helps most here)
+
+    /// TDT confidence threshold for very high confidence (near-certain transcription).
+    public static let veryHighConfidenceThreshold: Float = 0.95
+
+    /// CTC score margin required when TDT confidence is very high.
+    public static let veryHighConfidenceMargin: Float = 6.0
+
+    /// TDT confidence threshold for high confidence.
+    public static let highConfidenceThreshold: Float = 0.85
+
+    /// CTC score margin required when TDT confidence is high.
+    public static let highConfidenceMargin: Float = 3.0
+
+    /// TDT confidence threshold for moderate confidence.
+    public static let moderateConfidenceThreshold: Float = 0.70
+
+    /// CTC score margin required when TDT confidence is moderate.
+    public static let moderateConfidenceMargin: Float = 1.0
 }

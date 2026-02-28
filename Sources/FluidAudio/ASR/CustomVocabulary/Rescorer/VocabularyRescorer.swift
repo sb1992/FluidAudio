@@ -160,15 +160,20 @@ public struct VocabularyRescorer: Sendable {
         public let word: String
         public let startTime: Double
         public let endTime: Double
+        /// Average TDT decoder confidence for the tokens comprising this word.
+        /// Used by the confidence gate to resist replacing high-confidence words.
+        public let avgConfidence: Float
     }
 
     /// Build word-level timings from token timings.
     /// Tokens starting with space " " or "▁" (SentencePiece) begin new words.
+    /// Computes average TDT confidence per word from constituent token confidences.
     func buildWordTimings(from tokenTimings: [TokenTiming]) -> [WordTiming] {
         var wordTimings: [WordTiming] = []
         var currentWord = ""
         var wordStart: Double = 0
         var wordEnd: Double = 0
+        var tokenConfidences: [Float] = []
 
         for timing in tokenTimings {
             let token = timing.token
@@ -185,14 +190,19 @@ public struct VocabularyRescorer: Sendable {
                 // Save previous word (trim any leading/trailing whitespace)
                 let trimmedWord = currentWord.trimmingCharacters(in: .whitespaces)
                 if !trimmedWord.isEmpty {
+                    let avgConf = tokenConfidences.isEmpty
+                        ? 0.0
+                        : tokenConfidences.reduce(0, +) / Float(tokenConfidences.count)
                     wordTimings.append(
                         WordTiming(
                             word: trimmedWord,
                             startTime: wordStart,
-                            endTime: wordEnd
+                            endTime: wordEnd,
+                            avgConfidence: avgConf
                         ))
                 }
                 currentWord = ""
+                tokenConfidences = []
             }
 
             if startsNewWord {
@@ -202,16 +212,21 @@ public struct VocabularyRescorer: Sendable {
                 currentWord += token
             }
             wordEnd = timing.endTime
+            tokenConfidences.append(timing.confidence)
         }
 
         // Save final word
         let trimmedWord = currentWord.trimmingCharacters(in: .whitespaces)
         if !trimmedWord.isEmpty {
+            let avgConf = tokenConfidences.isEmpty
+                ? 0.0
+                : tokenConfidences.reduce(0, +) / Float(tokenConfidences.count)
             wordTimings.append(
                 WordTiming(
                     word: trimmedWord,
                     startTime: wordStart,
-                    endTime: wordEnd
+                    endTime: wordEnd,
+                    avgConfidence: avgConf
                 ))
         }
 

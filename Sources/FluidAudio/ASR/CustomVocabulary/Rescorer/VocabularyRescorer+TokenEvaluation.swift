@@ -84,8 +84,22 @@ extension VocabularyRescorer {
         let adaptiveCbwValue = config.adaptiveCbw(baseCbw: cbw, tokenCount: candidate.vocabTokens.count)
         let boostedVocabScore = vocabCtcScore + adaptiveCbwValue
 
-        // CTC-vs-CTC comparison
-        let shouldReplace = boostedVocabScore > originalCtcScore
+        // TDT confidence gate: high-confidence words resist replacement.
+        // When the TDT decoder is very confident in its transcription, require a larger
+        // CTC score margin before allowing vocabulary replacement.
+        let confidenceMargin: Float
+        if candidate.avgConfidence >= ContextBiasingConstants.veryHighConfidenceThreshold {
+            confidenceMargin = ContextBiasingConstants.veryHighConfidenceMargin
+        } else if candidate.avgConfidence >= ContextBiasingConstants.highConfidenceThreshold {
+            confidenceMargin = ContextBiasingConstants.highConfidenceMargin
+        } else if candidate.avgConfidence >= ContextBiasingConstants.moderateConfidenceThreshold {
+            confidenceMargin = ContextBiasingConstants.moderateConfidenceMargin
+        } else {
+            confidenceMargin = 0.0
+        }
+
+        // CTC-vs-CTC comparison with confidence-based margin
+        let shouldReplace = boostedVocabScore > (originalCtcScore + confidenceMargin)
 
         // Debug output
         let label = candidate.spanLength > 1 ? "[MULTI] " : ""
@@ -97,6 +111,10 @@ extension VocabularyRescorer {
             "    TDT span: [\(String(format: "%.2f", candidate.spanStartTime))-"
                 + "\(String(format: "%.2f", candidate.spanEndTime))s]"
         )
+        debugLog(
+            "    TDT confidence: \(String(format: "%.3f", candidate.avgConfidence)) "
+                + "→ margin=\(String(format: "%.1f", confidenceMargin))"
+        )
         debugLog("    CTC('\(candidate.originalPhrase)'): \(String(format: "%.2f", originalCtcScore))")
         let cbwInfo =
             config.useAdaptiveThresholds
@@ -106,7 +124,8 @@ extension VocabularyRescorer {
             "    CTC('\(candidate.vocabTerm)'): \(String(format: "%.2f", vocabCtcScore)) + cbw=\(cbwInfo) "
                 + "= \(String(format: "%.2f", boostedVocabScore))"
         )
-        debugLog("    -> \(shouldReplace ? "REPLACE" : "KEEP") (vocab \(shouldReplace ? ">" : "<=") original)")
+        let thresholdStr = String(format: "%.2f", originalCtcScore + confidenceMargin)
+        debugLog("    -> \(shouldReplace ? "REPLACE" : "KEEP") (vocab \(String(format: "%.2f", boostedVocabScore)) \(shouldReplace ? ">" : "<=") threshold \(thresholdStr))")
 
         // Preserve capitalization from original
         let firstOriginalWord =
