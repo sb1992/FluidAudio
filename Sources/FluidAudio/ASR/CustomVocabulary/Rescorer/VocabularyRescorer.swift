@@ -212,7 +212,17 @@ public struct VocabularyRescorer: Sendable {
                 currentWord += token
             }
             wordEnd = timing.endTime
-            tokenConfidences.append(timing.confidence)
+
+            // Exclude punctuation-only tokens from the confidence average.
+            // Tokens like "," or "." have low confidence that can drag down
+            // the word's average, causing the confidence gate to under-protect
+            // well-transcribed words (e.g. "Sarah," averaging 0.817 instead of 0.92).
+            let strippedToken = stripWordBoundaryPrefix(token)
+            let isPunctuation = !strippedToken.isEmpty
+                && strippedToken.allSatisfy({ !$0.isLetter && !$0.isNumber })
+            if !isPunctuation {
+                tokenConfidences.append(timing.confidence)
+            }
         }
 
         // Save final word
