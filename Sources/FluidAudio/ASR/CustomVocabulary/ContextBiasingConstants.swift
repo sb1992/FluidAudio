@@ -83,10 +83,10 @@ public enum ContextBiasingConstants {
     /// No replacement is considered if string similarity falls below this floor.
     /// Uses Levenshtein-based similarity: 1 - (editDistance / maxLength).
     ///
-    /// - Value: `0.60` (60% character overlap required)
-    /// - Example: "nvidia" vs "nvida" = 0.83 ✓, "phrases" vs "Shraey" = 0.57 ✗
+    /// - Value: `0.70` (70% character overlap required)
+    /// - Example: "nvidia" vs "nvida" = 0.83 ✓, "sarah" vs "shray" = 0.60 ✗
     /// - Used in: `ctcTokenRescore()` default parameter, BK-tree candidate filtering
-    public static let minSimilarityFloor: Float = 0.60
+    public static let minSimilarityFloor: Float = 0.70
 
     /// Default minimum similarity for vocabulary term matching.
     ///
