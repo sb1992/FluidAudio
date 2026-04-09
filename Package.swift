@@ -12,6 +12,10 @@ let package = Package(
             name: "FluidAudio",
             targets: ["FluidAudio"]
         ),
+        .library(
+            name: "FluidAudioEspeak",
+            targets: ["FluidAudioEspeak"]
+        ),
         .executable(
             name: "fluidaudiocli",
             targets: ["FluidAudioCLI"]
@@ -39,6 +43,19 @@ let package = Package(
             name: "MachTaskSelfWrapper",
             path: "Sources/MachTaskSelfWrapper",
             publicHeadersPath: "include"
+        ),
+        // TTS targets for FluidAudioEspeak product
+        .binaryTarget(
+            name: "ESpeakNG",
+            path: "Frameworks/ESpeakNG.xcframework"
+        ),
+        .target(
+            name: "FluidAudioEspeak",
+            dependencies: [
+                "FluidAudio",
+                "ESpeakNG",
+            ],
+            path: "Sources/FluidAudioEspeak"
         ),
         .executableTarget(
             name: "FluidAudioCLI",
