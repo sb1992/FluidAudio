@@ -292,6 +292,58 @@ public enum ParakeetEncoderPrecision: String, Sendable, CaseIterable {
 /// Centralized model names for all FluidAudio components
 public enum ModelNames {
 
+    // MERGE RESOLUTION (Drift SP1 rebase 2026-06-05): restored from fork commit
+    // e9ec7e3d. Upstream removed `ModelNames.TTS` when it removed the espeak/Kokoro
+    // TTS layer; the fork's FluidAudioEspeak target (Kokoro TTS for Drift) still
+    // depends on it. Restoring the original nested enum verbatim.
+    public enum TTS {
+
+        /// Available Kokoro variants shipped with the library.
+        public enum Variant: CaseIterable, Sendable {
+            case fiveSecond
+            case fifteenSecond
+
+            /// Underlying model bundle filename.
+            public var fileName: String {
+                // Use v1 models on all platforms - v2 has source_noise issues
+                switch self {
+                case .fiveSecond:
+                    return "kokoro_21_5s.mlmodelc"
+                case .fifteenSecond:
+                    return "kokoro_21_15s.mlmodelc"
+                }
+            }
+
+            /// Approximate maximum duration in seconds handled by the variant.
+            public var maxDurationSeconds: Int {
+                switch self {
+                case .fiveSecond:
+                    return 5
+                case .fifteenSecond:
+                    return 15
+                }
+            }
+        }
+
+        /// Preferred variant for general-purpose synthesis.
+        public static let defaultVariant: Variant = .fifteenSecond
+
+        /// Convenience accessor for bundle name lookup.
+        public static func bundle(for variant: Variant) -> String {
+            variant.fileName
+        }
+
+        /// Default bundle filename (legacy accessor).
+        public static var defaultBundle: String {
+            defaultVariant.fileName
+        }
+
+        /// All Kokoro model bundles required by the downloader.
+        public static var requiredModels: Set<String> {
+            Set(Variant.allCases.map(\.fileName))
+        }
+    }
+
     /// Diarizer model names
     public enum Diarizer {
         public static let segmentation = "pyannote_segmentation"
