@@ -932,6 +932,14 @@ extension VocabularyRescorer {
 
             let firstIdx = span.first!
             let lastIdx = span.last!
+            // MERGE RESOLUTION (Drift SP1 rebase 2026-06-05): the fork's confidence-gate
+            // commits added `avgConfidence` to CTCMatchCandidate; this upstream-new
+            // spotter-rescue path didn't supply it. Compute the span average the same
+            // way the fork's other call sites do (lines ~401, ~571, ~744).
+            let spanAvgConfidence: Float = {
+                let confidences = span.map { wordTimings[$0].avgConfidence }
+                return confidences.isEmpty ? 0 : confidences.reduce(0, +) / Float(confidences.count)
+            }()
             let candidate = CTCMatchCandidate(
                 originalPhrase: originalPhrase,
                 vocabTerm: vocabTerm,
@@ -940,7 +948,8 @@ extension VocabularyRescorer {
                 spanLength: span.count,
                 spanIndices: span,
                 spanStartTime: wordTimings[firstIdx].startTime,
-                spanEndTime: wordTimings[lastIdx].endTime
+                spanEndTime: wordTimings[lastIdx].endTime,
+                avgConfidence: spanAvgConfidence
             )
 
             let evalResult = evaluateCTCMatch(
