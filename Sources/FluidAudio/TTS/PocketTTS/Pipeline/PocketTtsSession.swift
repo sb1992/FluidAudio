@@ -58,12 +58,16 @@ public actor PocketTtsSession {
     private let stepModel: MLModel
     private let flowModel: MLModel
     private let mimiModel: MLModel
+    private let condLayerKeys: PocketTtsLayerKeys
+    private let flowlmLayerKeys: PocketTtsLayerKeys
+    private let mimiKeys: PocketTtsMimiKeys
 
     // Persistent state
     private let voiceKVSnapshot: PocketTtsSynthesizer.KVCacheState
     private let constants: PocketTtsConstantsBundle
     private let bosEmb: MLMultiArray
     private let temperature: Float
+    private let language: PocketTtsLanguage
     private var mimiState: PocketTtsSynthesizer.MimiState
     private var rng: SeededRNG
 
@@ -80,9 +84,13 @@ public actor PocketTtsSession {
         stepModel: MLModel,
         flowModel: MLModel,
         mimiModel: MLModel,
+        condLayerKeys: PocketTtsLayerKeys,
+        flowlmLayerKeys: PocketTtsLayerKeys,
+        mimiKeys: PocketTtsMimiKeys,
         bosEmb: MLMultiArray,
         temperature: Float,
-        seed: UInt64
+        seed: UInt64,
+        language: PocketTtsLanguage = .english
     ) {
         self.voiceKVSnapshot = voiceKVSnapshot
         self.mimiState = mimiState
@@ -91,8 +99,12 @@ public actor PocketTtsSession {
         self.stepModel = stepModel
         self.flowModel = flowModel
         self.mimiModel = mimiModel
+        self.condLayerKeys = condLayerKeys
+        self.flowlmLayerKeys = flowlmLayerKeys
+        self.mimiKeys = mimiKeys
         self.bosEmb = bosEmb
         self.temperature = temperature
+        self.language = language
         self.rng = SeededRNG(seed: seed)
 
         // Text queue channel
@@ -132,17 +144,18 @@ public actor PocketTtsSession {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { continue }
 
-                let chunks = PocketTtsSynthesizer.chunkText(
-                    trimmed, tokenizer: constants.tokenizer
+                let chunks = PocketTtsSynthesizer.chunkTextWithMetadata(
+                    trimmed, tokenizer: constants.tokenizer, language: language
                 )
                 Self.logger.info(
                     "Session enqueued '\(trimmed)', \(chunks.count) chunk(s)")
 
-                for (chunkIndex, chunkText) in chunks.enumerated() {
+                for (chunkIndex, chunk) in chunks.enumerated() {
                     if Task.isCancelled { break }
 
                     try await generateChunk(
-                        text: chunkText,
+                        text: chunk.text,
+                        isMidSentence: chunk.isMidSentence,
                         chunkIndex: chunkIndex,
                         chunkCount: chunks.count,
                         utteranceIndex: utteranceIndex
@@ -158,11 +171,13 @@ public actor PocketTtsSession {
 
     private func generateChunk(
         text: String,
+        isMidSentence: Bool,
         chunkIndex: Int,
         chunkCount: Int,
         utteranceIndex: Int
     ) async throws {
-        let (normalizedChunk, framesAfterEos) = PocketTtsSynthesizer.normalizeText(text)
+        let (normalizedChunk, framesAfterEos) = PocketTtsSynthesizer.normalizeText(
+            text, isMidSentence: isMidSentence, language: language)
         Self.logger.info("Session chunk \(chunkIndex): '\(normalizedChunk)'")
 
         // Tokenize and embed
@@ -172,7 +187,8 @@ public actor PocketTtsSession {
         // Clone voice KV snapshot and prefill text tokens only
         var kvState = try PocketTtsSynthesizer.cloneKVCacheState(voiceKVSnapshot)
         kvState = try await PocketTtsSynthesizer.prefillKVCacheText(
-            state: kvState, textEmbeddings: textEmbeddings, model: condModel
+            state: kvState, textEmbeddings: textEmbeddings, model: condModel,
+            layerKeys: condLayerKeys
         )
 
         // Generation loop
@@ -184,15 +200,15 @@ public actor PocketTtsSession {
         for step in 0..<maxGenLen {
             if Task.isCancelled { break }
 
-            // FlowLM step with local KV cache copy-in/copy-out
-            var localKV = kvState
+            // FlowLM step. `kvState` is function-local (not actor-isolated),
+            // so it can be passed `inout` to the async free function directly.
             let (transformerOut, eosLogit) = try await PocketTtsSynthesizer.runFlowLMStep(
                 sequence: sequence,
                 bosEmb: bosEmb,
-                state: &localKV,
-                model: stepModel
+                state: &kvState,
+                model: stepModel,
+                layerKeys: flowlmLayerKeys
             )
-            kvState = localKV
 
             // EOS detection
             if eosLogit > PocketTtsConstants.eosThreshold && eosStep == nil {
@@ -219,7 +235,8 @@ public actor PocketTtsSession {
             let frameSamples = try await PocketTtsSynthesizer.runMimiDecoder(
                 latent: latent,
                 state: &localMimi,
-                model: mimiModel
+                model: mimiModel,
+                mimiKeys: mimiKeys
             )
             mimiState = localMimi
 

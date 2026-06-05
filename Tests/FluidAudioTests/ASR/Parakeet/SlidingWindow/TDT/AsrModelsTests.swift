@@ -13,7 +13,7 @@ final class AsrModelsTests: XCTestCase {
         XCTAssertEqual(ModelNames.ASR.encoderFile, "Encoder.mlmodelc")
         XCTAssertEqual(ModelNames.ASR.decoderFile, "Decoder.mlmodelc")
         XCTAssertEqual(ModelNames.ASR.jointFile, "JointDecision.mlmodelc")
-        XCTAssertEqual(ModelNames.ASR.vocabulary(for: .parakeet), "parakeet_vocab.json")
+        XCTAssertEqual(ModelNames.ASR.vocabulary(for: .parakeetV3), "parakeet_vocab.json")
         XCTAssertEqual(ModelNames.ASR.vocabulary(for: .parakeetV2), "parakeet_vocab.json")
     }
 
@@ -35,7 +35,7 @@ final class AsrModelsTests: XCTestCase {
         // Verify path components
         XCTAssertTrue(cacheDir.path.contains("FluidAudio"))
         XCTAssertTrue(cacheDir.path.contains("Models"))
-        XCTAssertTrue(cacheDir.path.contains(Repo.parakeet.folderName))
+        XCTAssertTrue(cacheDir.path.contains(Repo.parakeetV3.folderName))
 
         // Verify it's an absolute path
         XCTAssertTrue(cacheDir.isFileURL)
@@ -69,7 +69,7 @@ final class AsrModelsTests: XCTestCase {
             ModelNames.ASR.encoderFile,
             ModelNames.ASR.decoderFile,
             ModelNames.ASR.jointFile,
-            ModelNames.ASR.vocabulary(for: .parakeet),
+            ModelNames.ASR.vocabulary(for: .parakeetV3),
         ]
 
         // Verify all expected model names are defined
@@ -130,10 +130,10 @@ final class AsrModelsTests: XCTestCase {
 
         // Test that download would target correct directory structure
         let expectedRepoPath = customDir.deletingLastPathComponent()
-            .appendingPathComponent(Repo.parakeet.folderName)
+            .appendingPathComponent(Repo.parakeetV3.folderName)
 
         // Verify path components
-        XCTAssertTrue(expectedRepoPath.path.contains(Repo.parakeet.folderName))
+        XCTAssertTrue(expectedRepoPath.path.contains(Repo.parakeetV3.folderName))
     }
 
     // MARK: - Model Loading Configuration Tests
@@ -177,10 +177,10 @@ final class AsrModelsTests: XCTestCase {
     func testRepoPathCalculation() {
         let modelsDir = URL(fileURLWithPath: "/test/Models/parakeet-tdt-0.6b-v3-coreml")
         let repoPath = modelsDir.deletingLastPathComponent()
-            .appendingPathComponent(Repo.parakeet.folderName)
+            .appendingPathComponent(Repo.parakeetV3.folderName)
 
-        XCTAssertTrue(repoPath.path.hasSuffix(Repo.parakeet.folderName))
-        XCTAssertEqual(repoPath.lastPathComponent, Repo.parakeet.folderName)
+        XCTAssertTrue(repoPath.path.hasSuffix(Repo.parakeetV3.folderName))
+        XCTAssertEqual(repoPath.lastPathComponent, Repo.parakeetV3.folderName)
     }
 
     // MARK: - Integration Test Helpers
@@ -315,7 +315,7 @@ final class AsrModelsTests: XCTestCase {
         // Verify correct HuggingFace repo
         XCTAssertEqual(AsrModelVersion.tdtCtc110m.repo, .parakeetTdtCtc110m)
         XCTAssertEqual(AsrModelVersion.v2.repo, .parakeetV2)
-        XCTAssertEqual(AsrModelVersion.v3.repo, .parakeet)
+        XCTAssertEqual(AsrModelVersion.v3.repo, .parakeetV3)
     }
 
     func testTdtCtc110mUsesSplitFrontend() {
@@ -376,5 +376,119 @@ final class AsrModelsTests: XCTestCase {
             // All versions should have at least 1 decoder layer
             XCTAssertGreaterThan(version.decoderLayers, 0)
         }
+    }
+
+    // MARK: - CTC-Only Model Validation Tests
+
+    func testCtcZhCnModelRejectsAsrModelsLoad() async throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AsrModelsTests-CtcZhCn-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        do {
+            _ = try await AsrModels.load(from: tempDir, version: .ctcZhCn)
+            XCTFail("AsrModels.load should reject .ctcZhCn version")
+        } catch let error as AsrModelsError {
+            // Verify it's the correct error
+            if case .loadingFailed(let message) = error {
+                XCTAssertTrue(
+                    message.contains("CtcZhCnManager"),
+                    "Error should direct user to CtcZhCnManager"
+                )
+            } else {
+                XCTFail("Wrong error type: \(error)")
+            }
+        }
+    }
+
+    func testCtcZhCnModelRejectsAsrModelsDownload() async throws {
+        do {
+            _ = try await AsrModels.download(version: .ctcZhCn)
+            XCTFail("AsrModels.download should reject .ctcZhCn version")
+        } catch let error as AsrModelsError {
+            // Verify it's the correct error
+            if case .downloadFailed(let message) = error {
+                XCTAssertTrue(
+                    message.contains("CtcZhCnModels"),
+                    "Error should direct user to CtcZhCnModels"
+                )
+            } else {
+                XCTFail("Wrong error type: \(error)")
+            }
+        }
+    }
+
+    func testCtcOnlyModelsAreMarkedCorrectly() {
+        // Verify CTC-only models are identified correctly
+        XCTAssertTrue(AsrModelVersion.ctcZhCn.isCtcOnly)
+
+        // Verify TDT models are not marked as CTC-only
+        XCTAssertFalse(AsrModelVersion.v2.isCtcOnly)
+        XCTAssertFalse(AsrModelVersion.v3.isCtcOnly)
+        XCTAssertFalse(AsrModelVersion.tdtCtc110m.isCtcOnly)
+        XCTAssertFalse(AsrModelVersion.tdtJa.isCtcOnly)
+    }
+
+    // MARK: - Issue #524: CTC head download in parakeet-ctc-110m repo
+
+    /// Regression guard for
+    /// https://github.com/FluidInference/FluidAudio/issues/524.
+    ///
+    /// `AsrModels.load(version: .tdtCtc110m)` optionally pulls
+    /// `CtcHead.mlmodelc` from the `parakeet-ctc-110m` repo, but that repo's
+    /// default required set is the standalone CTC frontend
+    /// (`MelSpectrogram` + `AudioEncoder`) and does NOT include the CTC head.
+    /// `DownloadUtils.loadModels` threads the caller's `modelNames` into
+    /// `downloadRepo` via `additionalModelNames` so the HF filter recurses
+    /// into the `CtcHead.mlmodelc/` directory.
+    func testParakeetCtc110mRequiredSetExcludesCtcHead() {
+        let required = ModelNames.getRequiredModelNames(for: .parakeetCtc110m, variant: nil)
+        XCTAssertTrue(required.contains(ModelNames.CTC.melSpectrogramPath))
+        XCTAssertTrue(required.contains(ModelNames.CTC.audioEncoderPath))
+        XCTAssertFalse(
+            required.contains(ModelNames.ASR.ctcHeadFile),
+            "CtcHead must not be in the parakeet-ctc-110m baseline required set; "
+                + "callers needing it must pass it via DownloadUtils.loadModels' "
+                + "modelNames parameter."
+        )
+    }
+
+    /// Verifies that the cache-validity check in `loadModelsOnce` (and the
+    /// matching filter in `downloadRepo`) sees `CtcHead.mlmodelc` as
+    /// missing even when the baseline required set is fully present on
+    /// disk. Pre-fix, the local cache check returned `true` here and the
+    /// download was skipped, leading to a silent `fileNoSuchFile` in the
+    /// model-loading loop.
+    func testLoadModelsCacheCheckIncludesExtraModelNames() throws {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AsrModelsTests-#524-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let repoDir = tempDir.appendingPathComponent(Repo.parakeetCtc110m.folderName)
+        let fm = FileManager.default
+        for name in [ModelNames.CTC.melSpectrogramPath, ModelNames.CTC.audioEncoderPath] {
+            let modelDir = repoDir.appendingPathComponent(name)
+            try fm.createDirectory(at: modelDir, withIntermediateDirectories: true)
+            try Data().write(to: modelDir.appendingPathComponent("coremldata.bin"))
+        }
+
+        // Baseline required set is present on disk.
+        let required = ModelNames.getRequiredModelNames(for: .parakeetCtc110m, variant: nil)
+        for name in required {
+            XCTAssertTrue(fm.fileExists(atPath: repoDir.appendingPathComponent(name).path))
+        }
+
+        // Caller asks for the CTC head — which is *not* on disk and *not* in
+        // the baseline required set. The fix's effective-models union must
+        // recognise this as a cache miss.
+        let requested: Set<String> = [ModelNames.ASR.ctcHeadFile]
+        let effective = required.union(requested)
+        let allEffectiveExist = effective.allSatisfy {
+            fm.fileExists(atPath: repoDir.appendingPathComponent($0).path)
+        }
+        XCTAssertFalse(
+            allEffectiveExist,
+            "Cache check must treat caller-requested model names as required."
+        )
     }
 }

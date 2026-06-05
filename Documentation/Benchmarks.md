@@ -411,6 +411,78 @@ Full benchmark across all 30 languages supported by Qwen3-ASR, matching the offi
 swift run -c release fluidaudiocli qwen3-benchmark --dataset fleurs --languages all
 ```
 
+## SenseVoice
+
+Non-autoregressive multilingual ASR using SenseVoiceSmall (FunASR, ~234M) converted to CoreML — SANM encoder + single CTC head, all tokens in one forward pass. See [ASR/SenseVoice.md](ASR/SenseVoice.md) for the architecture and conversion notes.
+
+Model: [FluidInference/sensevoice-small-coreml](https://huggingface.co/FluidInference/sensevoice-small-coreml)
+
+Hardware: Apple M5 Pro, macOS 26. FP16 encoder on the Neural Engine (`CPU_AND_NE`); FP32 CPU front-end. Full canonical test sets, directly comparable to the published [SenseVoice-Small results](https://github.com/FunAudioLLM/SenseVoice).
+
+### LibriSpeech test-clean (2620 files)
+
+| Metric | CoreML (ANE) | Official SenseVoice-Small |
+|--------|--------------|---------------------------|
+| WER (Avg) | **3.22%** | ~3.1% |
+| Median RTFx | 299x | — |
+
+### AISHELL-1 Chinese (7176 files)
+
+| Metric | CoreML (ANE) | Official SenseVoice-Small |
+|--------|--------------|---------------------------|
+| CER (Avg) | **3.09%** | ~2.9% |
+| Median RTFx | 382x | — |
+
+### int8 encoder variant (`--int8`)
+
+Post-training weight quantization of the encoder — **~half the size, accuracy-neutral** vs fp16 (run on ANE). Full canonical test sets:
+
+| | size | LibriSpeech WER | AISHELL CER | peak RAM |
+|---|------|-----------------|-------------|----------|
+| fp16 (default) | 447 MB | 3.22% | 3.09% | 0.54 GB |
+| **int8** | **225 MB** | **3.25%** | **3.09%** | **0.32 GB** |
+
+(Δ +0.03 pp / 0.00 pp on the full LibriSpeech test-clean (2,620) / AISHELL-1 test (7,176), 0 NaN.) int4 per-tensor palettization wrecks accuracy (WER 31%) and is not shipped.
+
+**Methodology notes:**
+- CER (character-level, whitespace removed) is the primary metric for Chinese, matching the official SenseVoice chart (AISHELL-1 test).
+- Both numbers reproduce the published SenseVoice-Small results, confirming the CoreML conversion (front-end + encoder + decode) is faithful.
+- CoreML↔PyTorch parity additionally verified on FLEURS: en WER Δ +0.00pp, zh CER Δ −0.03pp (100 samples/lang).
+- The FP16 encoder is correct only on the Neural Engine (NaN on the CPU/GPU FP16 path); non-ANE hardware uses the `--fp32` build. See [ASR/SenseVoice.md](ASR/SenseVoice.md#conversion-notes--findings).
+- AISHELL-1 dataset: [TwinkStart/AISHELL-1](https://huggingface.co/datasets/TwinkStart/AISHELL-1).
+
+```bash
+# FLEURS WER/CER (in-repo, multilingual)
+swift run -c release fluidaudiocli sensevoice-benchmark --languages en_us,cmn_hans_cn --samples all
+```
+
+## Paraformer
+
+Non-autoregressive Mandarin (zh) ASR: SANM encoder + CIF predictor (host
+integrate-and-fire) + parallel decoder. See [ASR/Paraformer.md](ASR/Paraformer.md).
+
+Model: [FluidInference/paraformer-large-zh-coreml](https://huggingface.co/FluidInference/paraformer-large-zh-coreml)
+
+Hardware: Apple M5 Pro, macOS 26. Encoder/CifAlphas/decoder on ANE; FP32 CPU front-end.
+
+### AISHELL-1 Chinese (7176 files, full test, full-CoreML pipeline)
+
+| Precision | size (enc+dec) | CER | median RTFx | peak RAM | Official |
+|-----------|----------------|-----|-------------|----------|----------|
+| fp16 (default) | 411 MB | **2.12%** | 85× | 0.38 GB | ~1.95% |
+| int8 | 207 MB | **2.12%** | 84× | 0.24 GB | ~1.95% |
+
+**Methodology notes:**
+- CER (character-level, whitespace removed) is the primary metric for Chinese, matching the official Paraformer-large AISHELL-1 number.
+- int8 weight quantization (encoder + decoder) is accuracy-neutral (CER unchanged on the full set), ~half the size/memory.
+- The ~0.17 pp gap vs official is fp16 + the fixed-shape decoder (enc 512 / tokens 128). RTFx (~85×) is lower than SenseVoice (~400×) because Paraformer runs 3 CoreML predicts/clip + the decoder pads short clips to 512 frames — an enumerated decoder would raise it.
+- AISHELL-1 dataset: [TwinkStart/AISHELL-1](https://huggingface.co/datasets/TwinkStart/AISHELL-1).
+
+```bash
+swift run -c release fluidaudiocli paraformer-transcribe audio.wav         # fp16
+swift run -c release fluidaudiocli paraformer-transcribe audio.wav --int8  # half size
+```
+
 ## Streaming ASR (Parakeet EOU)
 
 Real-time streaming ASR with End-of-Utterance detection using the Parakeet EOU 120M CoreML model.
@@ -458,9 +530,67 @@ swift run -c release fluidaudiocli nemotron-benchmark --chunk 1120
 swift run -c release fluidaudiocli nemotron-benchmark --chunk 560
 ```
 
+## Streaming ASR (Nemotron Multilingual)
+
+NVIDIA's Nemotron 3.5 ASR Streaming Multilingual 0.6B — real-time streaming RNN-T
+covering ~40 language-locales, fully on-device. Two models share one encoder per
+tier: `latin` (en/es/fr/it/pt/de, 2,828-token script-pruned vocab) and
+`multilingual` (zh/ja + 100+ via `prompt_id`, full 13,087 vocab).
+
+Model: [FluidInference/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML](https://huggingface.co/FluidInference/Nemotron-3.5-ASR-Streaming-Multilingual-0.6b-CoreML)
+
+Hardware: Apple M5 Pro, macOS 26.5. Encoder/decoder/joint on ANE
+(`.cpuAndNeuralEngine`), CoreML iOS 17 target. Per-file sum-aggregate RTFx, 2.24 s
+(2240 ms) tier, B1 fused decode.
+
+### LibriSpeech test-clean (English, 2620 files, 5.40h audio)
+
+| Model | Vocab | WER | RTFx |
+|-------|-------|-----|------|
+| `latin` | 2,828 | 3.6% | 124x |
+| `multilingual` | 13,087 | 3.2% | 76x |
+
+`latin` is ~1.6× faster than the full-vocab model on the same English audio
+(smaller per-frame joint matmul) at ~0.4 pp WER. English WER uses the HF
+`EnglishTextNormalizer` (Open ASR Leaderboard convention).
+
+### FLEURS (full test splits, 2.24 s tier)
+
+| Language | Model | WER / CER | RTFx |
+|----------|-------|-----------|------|
+| English (en) | `latin` | 8.96% | 130x |
+| Spanish (es) | `latin` | 4.80% | 140x |
+| French (fr) | `latin` | 9.52% | 130x |
+| Italian (it) | `latin` | 5.41% | 147x |
+| Portuguese (pt) | `latin` | 6.14% | 141x |
+| German (de) | `latin` | 9.83% | 144x |
+| Chinese (zh) | `multilingual` | 18.57% CER | 89x |
+| Japanese (ja) | `multilingual` | 13.79% CER | 84x |
+
+FLEURS is multi-domain and digit-bearing, so it runs higher than test-clean for
+the same model. Reference and hypothesis are normalized with
+[`text-processing-rs`](https://github.com/FluidInference/text-processing-rs) —
+FluidInference's Rust port of NVIDIA NeMo's (inverse) text-normalization grammars
+(~98.6% NeMo-suite compatibility) — to match NVIDIA's FLEURS scoring; zh/ja are
+scored as CER. (The `nemotron-multilingual-benchmark` CLI's built-in scorer uses
+a lighter Swift normalizer, so non-English numbers it prints may differ slightly
+from these.) The full-vocab `multilingual` model is chunk-sensitive — use the 2 s
+tier for zh/ja.
+
+```bash
+# LibriSpeech test-clean (English)
+swift run -c release fluidaudiocli nemotron-multilingual-benchmark \
+  --dataset librispeech --librispeech-subset test-clean --model-dir <model-dir>
+
+# FLEURS per-language
+swift run -c release fluidaudiocli nemotron-multilingual-benchmark \
+  --dataset fleurs --languages en_us,es_419,fr_fr,it_it,pt_br,de_de,cmn_hans_cn,ja_jp \
+  --model-dir <model-dir>
+```
+
 ## Speaker Diarization
 
-The offline version uses the community-1 model, the online version uses the legacy speaker-diarization-3.1 model.
+Both offline and online versions use the community-1 model (via FluidInference/speaker-diarization-coreml).
 
 ### Offline diarization pipeline
 
@@ -484,6 +614,40 @@ Step Ratio 1, min duration 0 (edited)
 ```
 
 Note that the baseline pytorch version is ~11% DER, we lost some precision dropping down to fp16 precision in order to run most of the embedding model on neural engine. But as a result, we significantly out perform the baseline `mps` backend as well. the pyannote-community-1 on cpu is ~1.5-2 RTFx, on mps, it's ~20-25 RTFx.
+
+Running on the full AMI SDM 16-meeting test set (official NeMo/pyannote evaluation split: EN2002, ES2004, IS1009, TS3003 × a-d):
+
+```bash
+swift run -c release fluidaudiocli diarization-benchmark --mode offline \
+    --dataset ami-sdm --auto-download
+```
+
+```text
+------------------------------------------------------------------------------------------
+Meeting        DER %    JER %    Miss %     FA %     SE %   Speakers     RTFx
+------------------------------------------------------------------------------------------
+IS1009c           5.1      5.9      3.1      1.5      0.6     4/4        94.6
+IS1009b           5.4      6.4      2.8      1.4      1.1     4/4        77.6
+ES2004b           6.0      7.0      2.7      2.2      1.1     4/4        70.4
+ES2004c           6.4      7.3      2.0      3.4      1.0     4/4        70.5
+EN2002c           7.8      9.7      5.1      0.5      2.2     3/3        60.3
+TS3003b           8.0      7.8      3.6      3.7      0.7     4/4        71.4
+TS3003c           9.0      8.7      6.1      1.9      0.9     4/4        70.4
+EN2002b           9.1     12.9      4.0      1.9      3.2     5/4        63.4
+IS1009d           9.2     11.7      4.5      2.6      2.2     4/4        91.6
+IS1009a           9.9     11.9      5.0      2.5      2.4     4/4        60.8
+ES2004a          10.4     13.4      7.5      1.6      1.4     4/4        60.0
+EN2002a          10.6     15.0      5.4      1.2      4.0     4/4        52.2
+ES2004d          11.4     16.4      5.3      2.6      3.5     4/4        62.1
+TS3003a          17.2     64.1     13.1      1.3      2.8     2/4        68.7
+EN2002d          18.3     38.2      4.6      1.5     12.2     3/4        78.6
+TS3003d          26.0     41.6     11.0      2.2     12.8     3/4        64.5
+------------------------------------------------------------------------------------------
+AVERAGE          10.6     17.4      5.4      2.0      3.3      -         69.8
+==========================================================================================
+```
+
+12/16 meetings detect the correct speaker count. Average DER 10.62% matches published pyannote-community-1 offline numbers on this split (~11-12%).
 
 ### Streaming/online Diarization
 
@@ -642,20 +806,21 @@ AVERAGE          31.7     21.5      0.5      9.7         -     126.7
 ## LS-EEND Streaming Diarization
 A research prototype from Westlake University for streaming speaker diarization.
 
-Model: [GradientDescent2718/ls-eend-coreml](https://huggingface.co/GradientDescent2718/ls-eend-coreml). 
+Model: [FluidInference/lseend-coreml](https://huggingface.co/FluidInference/lseend-coreml).
 
 Hardware: Apple M4 MAX, 2026, macOS 26.1 (CPU only)
 
-### AMI SDM Dataset (AMI Config - 1s latency, 0.5s between updates)
+### AMI SDM Dataset (AMI variant, `--step-size 500ms`)
+
+Each LS-EEND CoreML bundle is keyed by `(variant, stepSize)`. The run below uses the `.ami` variant with `.step500ms`, which commits 5 output frames (~500 ms) per CoreML call.
 
 ```bash
-swift run fluidaudiocli lseend-benchmark --variant ami --auto-download
+swift run fluidaudiocli lseend-benchmark --variant ami --step-size 500ms --auto-download
 ```
 
 ```text
 ================================================================================
 LS-EEND BENCHMARK SUMMARY
-[23:17:34.535] [DEBUG] [FluidAudio.LSEENDDiarizer] LS-EEND state reset
 ================================================================================
 Results Sorted by DER:
 ----------------------------------------------------------------------

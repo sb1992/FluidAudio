@@ -55,10 +55,13 @@ public actor StreamingNemotronAsrManager {
     public private(set) var mlConfiguration: MLModelConfiguration
 
     public init(
-        configuration: MLModelConfiguration = MLModelConfiguration(),
+        configuration: MLModelConfiguration? = nil,
         requestedChunkSize: NemotronChunkSize? = nil
     ) {
-        self.mlConfiguration = configuration
+        // Default to `.cpuAndNeuralEngine`: the int8 encoder is ANE-targeted.
+        // Under the bare `MLModelConfiguration()` default (which is `.all`),
+        // CoreML routes int8 ops to GPU and runs ~10× slower than the ANE path.
+        self.mlConfiguration = configuration ?? MLModelConfigurationUtils.defaultConfiguration()
         self.requestedChunkSize = requestedChunkSize
         self.config = NemotronStreamingConfig()
         self.lastToken = Int32(config.blankIdx)
@@ -72,6 +75,11 @@ public actor StreamingNemotronAsrManager {
     /// Load models from a directory containing preprocessor, encoder, decoder, joint, and tokenizer
     /// - Parameter directory: Directory containing the model files
     public func loadModels(from directory: URL) async throws {
+        guard SystemInfo.isAppleSilicon else {
+            throw ASRError.unsupportedPlatform(
+                "Nemotron int8 streaming models require Apple Silicon (ANE). Intel Macs are not supported."
+            )
+        }
         logger.info("Loading Nemotron CoreML models from \(directory.path)...")
 
         // Load config from metadata.json
@@ -187,6 +195,12 @@ public actor StreamingNemotronAsrManager {
         cacheChannel = caches.channel
         cacheTime = caches.time
         cacheLen = caches.len
+        // Seed cache_len with 1 instead of 0 so the encoder's
+        // `ios17.slice_by_index` op never sees a zero-length slice, which would
+        // fail CoreML shape inference and skip MPSGraph caching on every
+        // session start. The cache buffers are zero, so this is equivalent to
+        // 1 frame of silence preamble. See issue #607.
+        cacheLen?[0] = 1
 
         // Mel cache (will be initialized on first chunk)
         melCache = nil

@@ -88,18 +88,32 @@ public final class OfflineDiarizerManager {
         }
     }
 
-    public func process(audio: [Float]) async throws -> DiarizationResult {
+    /// - Parameters:
+    ///   - audio: Mono audio samples at the model's target sample rate.
+    ///   - progressCallback: Optional callback receiving `(chunksProcessed, totalChunks)` after each segmentation chunk.
+    public func process(
+        audio: [Float], progressCallback: (@Sendable (Int, Int) -> Void)? = nil
+    )
+        async throws -> DiarizationResult
+    {
         try await process(
             audioSource: ArrayAudioSampleSource(samples: audio),
-            audioLoadingSeconds: 0
+            audioLoadingSeconds: 0,
+            progressCallback: progressCallback
         )
     }
 
     /// Process audio from a file URL using memory-mapped streaming for efficiency.
     /// Automatically converts the audio to the target sample rate and processes in chunks.
-    /// - Parameter url: Path to the audio file
+    /// - Parameters:
+    ///   - url: Path to the audio file.
+    ///   - progressCallback: Optional callback receiving `(chunksProcessed, totalChunks)` after each segmentation chunk.
     /// - Returns: Diarization result with speaker segments
-    public func process(_ url: URL) async throws -> DiarizationResult {
+    public func process(
+        _ url: URL, progressCallback: (@Sendable (Int, Int) -> Void)? = nil
+    )
+        async throws -> DiarizationResult
+    {
         let factory = AudioSourceFactory()
         let (source, loadDuration) = try factory.makeDiskBackedSource(
             from: url,
@@ -109,13 +123,19 @@ public final class OfflineDiarizerManager {
 
         return try await process(
             audioSource: source,
-            audioLoadingSeconds: loadDuration
+            audioLoadingSeconds: loadDuration,
+            progressCallback: progressCallback
         )
     }
 
+    /// - Parameters:
+    ///   - audioSource: Audio sample source to process.
+    ///   - audioLoadingSeconds: Time spent loading/converting the audio, included in timing logs.
+    ///   - progressCallback: Optional callback receiving `(chunksProcessed, totalChunks)` after each segmentation chunk.
     public func process(
         audioSource: AudioSampleSource,
-        audioLoadingSeconds: TimeInterval
+        audioLoadingSeconds: TimeInterval,
+        progressCallback: (@Sendable (Int, Int) -> Void)? = nil
     ) async throws -> DiarizationResult {
         try config.validate()
         if models == nil {
@@ -127,6 +147,8 @@ public final class OfflineDiarizerManager {
         }
 
         let totalStart = Date()
+        let totalChunks = max(
+            1, (audioSource.sampleCount + config.samplesPerStep - 1) / config.samplesPerStep)
 
         let streamPair = AsyncThrowingStream<SegmentationChunk, Error>.makeStream()
         let chunkStream = streamPair.stream
@@ -136,7 +158,7 @@ public final class OfflineDiarizerManager {
         let capturedModels = models
         let capturedConfig = config
 
-        let segmentationTask = Task(priority: .userInitiated) {
+        let segmentationTask = Task.detached(priority: .userInitiated) {
             [capturedModels, capturedConfig] () throws -> (SegmentationOutput, TimeInterval) in
             let processor = OfflineSegmentationProcessor()
             let start = Date()
@@ -146,6 +168,7 @@ public final class OfflineDiarizerManager {
                     segmentationModel: capturedModels.segmentationModel,
                     config: capturedConfig,
                     chunkHandler: { chunk in
+                        progressCallback?(chunk.chunkIndex + 1, totalChunks)
                         switch chunkContinuation.yield(chunk) {
                         case .enqueued, .dropped:
                             return .continue
@@ -164,7 +187,7 @@ public final class OfflineDiarizerManager {
             }
         }
 
-        let embeddingTask = Task(priority: .userInitiated) {
+        let embeddingTask = Task.detached(priority: .userInitiated) {
             [capturedModels, capturedConfig] () throws -> ([TimedEmbedding], TimeInterval) in
             let extractor = OfflineEmbeddingExtractor(
                 fbankModel: capturedModels.fbankModel,
@@ -315,6 +338,15 @@ public final class OfflineDiarizerManager {
             )
         }
 
+        let publicChunkEmbeddings: [ChunkEmbedding]? =
+            config.exposeChunkEmbeddings
+            ? Self.buildPublicChunkEmbeddings(
+                timedEmbeddings: timedEmbeddings,
+                assignments: assignments,
+                logger: logger
+            )
+            : nil
+
         let totalProcessing = Date().timeIntervalSince(totalStart)
         let timings = PipelineTimings(
             modelCompilationSeconds: models.compilationDuration,
@@ -328,8 +360,46 @@ public final class OfflineDiarizerManager {
         return DiarizationResult(
             segments: segments,
             speakerDatabase: speakerDatabase,
+            chunkEmbeddings: publicChunkEmbeddings,
             timings: timings
         )
+    }
+
+    /// Map the internal `[TimedEmbedding] + assignments` pair to the public
+    /// `[ChunkEmbedding]` representation. Speaker IDs follow the same
+    /// "S\(cluster + 1)" convention used by `OfflineReconstruction.buildSegments`,
+    /// so chunk embeddings can be aligned to `DiarizationResult.segments[*].speakerId`
+    /// by string equality.
+    ///
+    /// Returns `[]` if the input arrays disagree on length — this is treated as
+    /// a logged invariant violation so an unexpected mismatch surfaces in
+    /// production logs rather than silently breaking the public API contract.
+    ///
+    /// `internal` so unit tests in `OfflineModuleTests` can exercise the
+    /// mapping without needing a full pipeline run.
+    static func buildPublicChunkEmbeddings(
+        timedEmbeddings: [TimedEmbedding],
+        assignments: [Int],
+        logger: AppLogger
+    ) -> [ChunkEmbedding] {
+        guard timedEmbeddings.count == assignments.count else {
+            logger.warning(
+                "buildPublicChunkEmbeddings: timedEmbeddings.count (\(timedEmbeddings.count)) "
+                    + "!= assignments.count (\(assignments.count)); chunkEmbeddings will be empty"
+            )
+            return []
+        }
+        return zip(timedEmbeddings, assignments).map { te, cluster in
+            ChunkEmbedding(
+                speakerId: "S\(cluster + 1)",
+                chunkIndex: te.chunkIndex,
+                speakerIndex: te.speakerIndex,
+                startTimeSeconds: te.startTime,
+                endTimeSeconds: te.endTime,
+                embedding256: te.embedding256,
+                rho128: te.rho128
+            )
+        }
     }
 
     private func purgeDiarizerRepo(at baseDirectory: URL) throws {

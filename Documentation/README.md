@@ -13,10 +13,11 @@
 - [Qwen3 ASR](ASR/Qwen3-ASR.md)
 - [CTC Decoder Guide](CtcDecoderGuide.md)
 - [Custom Vocabulary](ASR/CustomVocabulary.md)
-- [Custom Pronunciation](ASR/CustomPronunciation.md)
 - [Post-Processing (ITN)](ASR/PostProcessing.md)
+- [Long Transcription](ASR/LongTranscription.md)
 - [Last Chunk Handling](ASR/LastChunkHandling.md)
 - [Manual Model Loading](ASR/ManualModelLoading.md)
+- [Encoder Compute Placement](ASR/EncoderComputePlacement.md)
 - [Directory Structure](ASR/DirectoryStructure.md)
 - [Parakeet Benchmarks](ASR/benchmarks100.md)
 
@@ -37,10 +38,11 @@
 
 ## Text-to-Speech (TTS)
 
-- [Kokoro](TTS/Kokoro.md)
+- [Kokoro ANE (7-stage)](TTS/KokoroAne.md)
 - [PocketTTS](TTS/PocketTTS.md)
+- [StyleTTS2](TTS/StyleTTS2.md)
+- [Magpie](TTS/Magpie.md)
 - [SSML](TTS/SSML.md)
-- [Voice Quality Comparison](TTS/voice-quality.md)
 
 ## Developer Guides
 

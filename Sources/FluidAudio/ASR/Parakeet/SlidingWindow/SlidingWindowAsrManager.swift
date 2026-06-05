@@ -251,16 +251,11 @@ public actor SlidingWindowAsrManager {
             if !volatileTranscript.isEmpty { parts.append(volatileTranscript) }
             finalText = parts.joined(separator: " ")
         } else if !accumulatedTokens.isEmpty,
-            let finalResult = await asrManager?.processTranscriptionResult(
-                tokenIds: accumulatedTokens,
-                timestamps: [],
-                confidences: [],  // No per-token confidences needed for final text
-                encoderSequenceLength: 0,
-                audioSamples: [],  // Not needed for final text conversion
-                processingTime: 0
-            )
+            let reconstructedText = await asrManager?.convertTokensToText(accumulatedTokens)
         {
-            finalText = finalResult.text
+            // finish() only needs the merged text. Re-entering ASRResult processing here
+            // fabricates a missing-confidence warning even though no confidence score is required.
+            finalText = reconstructedText
         } else {
             var parts: [String] = []
             if !confirmedTranscript.isEmpty { parts.append(confirmedTranscript) }
@@ -694,6 +689,12 @@ public struct SlidingWindowAsrConfig: Sendable {
 
     /// Confidence threshold for promoting volatile text to confirmed (0.0...1.0)
     public let confirmationThreshold: Double
+
+    /// TDT decoder configuration. When `nil`, `TdtConfig()` is used (blankId 8192, v3 default).
+    /// Pass an explicit value when using a v2 model (blankId 1024) to avoid relying on
+    /// `AsrManager`'s internal blank-token auto-adaptation.
+    public let tdtConfig: TdtConfig?
+
     /// Default configuration aligned with previous API expectations
     public static let `default` = SlidingWindowAsrConfig(
         chunkSeconds: 15.0,
@@ -722,7 +723,8 @@ public struct SlidingWindowAsrConfig: Sendable {
         leftContextSeconds: TimeInterval = 2.0,
         rightContextSeconds: TimeInterval = 2.0,
         minContextForConfirmation: TimeInterval = 10.0,
-        confirmationThreshold: Double = 0.85
+        confirmationThreshold: Double = 0.85,
+        tdtConfig: TdtConfig? = nil
     ) {
         self.chunkSeconds = chunkSeconds
         self.hypothesisChunkSeconds = hypothesisChunkSeconds
@@ -730,6 +732,20 @@ public struct SlidingWindowAsrConfig: Sendable {
         self.rightContextSeconds = rightContextSeconds
         self.minContextForConfirmation = minContextForConfirmation
         self.confirmationThreshold = confirmationThreshold
+        self.tdtConfig = tdtConfig
+    }
+
+    /// Returns a copy of this config with the given TDT configuration applied.
+    public func applying(tdtConfig: TdtConfig) -> SlidingWindowAsrConfig {
+        SlidingWindowAsrConfig(
+            chunkSeconds: chunkSeconds,
+            hypothesisChunkSeconds: hypothesisChunkSeconds,
+            leftContextSeconds: leftContextSeconds,
+            rightContextSeconds: rightContextSeconds,
+            minContextForConfirmation: minContextForConfirmation,
+            confirmationThreshold: confirmationThreshold,
+            tdtConfig: tdtConfig
+        )
     }
 
     /// Backward-compatible convenience initializer used by tests (chunkDuration label)
@@ -766,7 +782,7 @@ public struct SlidingWindowAsrConfig: Sendable {
     var asrConfig: ASRConfig {
         ASRConfig(
             sampleRate: 16000,
-            tdtConfig: TdtConfig()
+            tdtConfig: tdtConfig ?? TdtConfig()
         )
     }
 

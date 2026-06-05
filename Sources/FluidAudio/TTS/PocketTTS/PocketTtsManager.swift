@@ -20,18 +20,35 @@ public actor PocketTtsManager {
     private var defaultVoice: String
     private var isInitialized = false
 
+    /// The language pack this manager loads. Immutable for the lifetime of the
+    /// manager — to switch languages, create a new `PocketTtsManager`.
+    public nonisolated let language: PocketTtsLanguage
+
     /// Creates a new PocketTTS manager.
     ///
     /// - Parameters:
     ///   - defaultVoice: Default voice identifier (default: "alba").
+    ///   - language: Which upstream language pack to load. Defaults to
+    ///     `.english` for backward compatibility.
     ///   - directory: Optional override for the base cache directory.
     ///     When `nil`, uses the default platform cache location.
+    ///   - precision: Which FlowLM precision to load (default: `.fp16`,
+    ///     matching upstream's on-disk weight format). `.int8` swaps
+    ///     `flowlm_step` for the upstream `flowlm_stepv2` int8-quantized
+    ///     variant per kyutai-labs/pocket-tts#147.
     public init(
         defaultVoice: String = PocketTtsConstants.defaultVoice,
-        directory: URL? = nil
+        language: PocketTtsLanguage = .english,
+        directory: URL? = nil,
+        precision: PocketTtsPrecision = .fp16
     ) {
-        self.modelStore = PocketTtsModelStore(directory: directory)
+        self.modelStore = PocketTtsModelStore(
+            language: language,
+            directory: directory,
+            precision: precision
+        )
         self.defaultVoice = defaultVoice
+        self.language = language
     }
 
     public var isAvailable: Bool {
@@ -57,20 +74,27 @@ public actor PocketTtsManager {
         text: String,
         voice: String? = nil,
         temperature: Float = PocketTtsConstants.temperature,
-        deEss: Bool = true
+        deEss: Bool = true,
+        maxTokensPerChunk: Int = PocketTtsConstants.maxTokensPerChunk
     ) async throws -> Data {
         guard isInitialized else {
             throw PocketTTSError.modelNotFound("PocketTTS model not initialized")
         }
 
         let selectedVoice = voice ?? defaultVoice
+        // Capture `language` into a local to keep the closure non-`self`-isolated
+        // — the actor's `nonisolated let` is otherwise inferred as a self-isolated
+        // capture under SE-0414's region-based Sendable check.
+        let language = self.language
 
         return try await PocketTtsSynthesizer.withModelStore(modelStore) {
             let result = try await PocketTtsSynthesizer.synthesize(
                 text: text,
                 voice: selectedVoice,
                 temperature: temperature,
-                deEss: deEss
+                deEss: deEss,
+                maxTokensPerChunk: maxTokensPerChunk,
+                language: language
             )
             return result.audio
         }
@@ -96,18 +120,23 @@ public actor PocketTtsManager {
         text: String,
         voiceData: PocketTtsVoiceData,
         temperature: Float = PocketTtsConstants.temperature,
-        deEss: Bool = true
+        deEss: Bool = true,
+        maxTokensPerChunk: Int = PocketTtsConstants.maxTokensPerChunk
     ) async throws -> Data {
         guard isInitialized else {
             throw PocketTTSError.modelNotFound("PocketTTS model not initialized")
         }
+
+        let language = self.language
 
         return try await PocketTtsSynthesizer.withModelStore(modelStore) {
             let result = try await PocketTtsSynthesizer.synthesize(
                 text: text,
                 voiceData: voiceData,
                 temperature: temperature,
-                deEss: deEss
+                deEss: deEss,
+                maxTokensPerChunk: maxTokensPerChunk,
+                language: language
             )
             return result.audio
         }
@@ -118,20 +147,24 @@ public actor PocketTtsManager {
         text: String,
         voice: String? = nil,
         temperature: Float = PocketTtsConstants.temperature,
-        deEss: Bool = true
+        deEss: Bool = true,
+        maxTokensPerChunk: Int = PocketTtsConstants.maxTokensPerChunk
     ) async throws -> PocketTtsSynthesizer.SynthesisResult {
         guard isInitialized else {
             throw PocketTTSError.modelNotFound("PocketTTS model not initialized")
         }
 
         let selectedVoice = voice ?? defaultVoice
+        let language = self.language
 
         return try await PocketTtsSynthesizer.withModelStore(modelStore) {
             try await PocketTtsSynthesizer.synthesize(
                 text: text,
                 voice: selectedVoice,
                 temperature: temperature,
-                deEss: deEss
+                deEss: deEss,
+                maxTokensPerChunk: maxTokensPerChunk,
+                language: language
             )
         }
     }
@@ -161,19 +194,23 @@ public actor PocketTtsManager {
     public func synthesizeStreaming(
         text: String,
         voice: String? = nil,
-        temperature: Float = PocketTtsConstants.temperature
+        temperature: Float = PocketTtsConstants.temperature,
+        maxTokensPerChunk: Int = PocketTtsConstants.maxTokensPerChunk
     ) async throws -> AsyncThrowingStream<PocketTtsSynthesizer.AudioFrame, Error> {
         guard isInitialized else {
             throw PocketTTSError.modelNotFound("PocketTTS model not initialized")
         }
 
         let selectedVoice = voice ?? defaultVoice
+        let language = self.language
 
         return try await PocketTtsSynthesizer.withModelStore(modelStore) {
             try await PocketTtsSynthesizer.synthesizeStreaming(
                 text: text,
                 voice: selectedVoice,
-                temperature: temperature
+                temperature: temperature,
+                maxTokensPerChunk: maxTokensPerChunk,
+                language: language
             )
         }
     }
@@ -191,17 +228,22 @@ public actor PocketTtsManager {
     public func synthesizeStreaming(
         text: String,
         voiceData: PocketTtsVoiceData,
-        temperature: Float = PocketTtsConstants.temperature
+        temperature: Float = PocketTtsConstants.temperature,
+        maxTokensPerChunk: Int = PocketTtsConstants.maxTokensPerChunk
     ) async throws -> AsyncThrowingStream<PocketTtsSynthesizer.AudioFrame, Error> {
         guard isInitialized else {
             throw PocketTTSError.modelNotFound("PocketTTS model not initialized")
         }
 
+        let language = self.language
+
         return try await PocketTtsSynthesizer.withModelStore(modelStore) {
             try await PocketTtsSynthesizer.synthesizeStreaming(
                 text: text,
                 voiceData: voiceData,
-                temperature: temperature
+                temperature: temperature,
+                maxTokensPerChunk: maxTokensPerChunk,
+                language: language
             )
         }
     }
@@ -276,11 +318,13 @@ public actor PocketTtsManager {
         temperature: Float,
         seed: UInt64?
     ) async throws -> PocketTtsSession {
+        let language = self.language
         return try await PocketTtsSynthesizer.withModelStore(modelStore) {
             try await PocketTtsSynthesizer.makeSession(
                 voiceData: voiceData,
                 temperature: temperature,
-                seed: seed
+                seed: seed,
+                language: language
             )
         }
     }
@@ -291,7 +335,8 @@ public actor PocketTtsManager {
         outputURL: URL,
         voice: String? = nil,
         temperature: Float = PocketTtsConstants.temperature,
-        deEss: Bool = true
+        deEss: Bool = true,
+        maxTokensPerChunk: Int = PocketTtsConstants.maxTokensPerChunk
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
@@ -301,7 +346,8 @@ public actor PocketTtsManager {
             text: text,
             voice: voice,
             temperature: temperature,
-            deEss: deEss
+            deEss: deEss,
+            maxTokensPerChunk: maxTokensPerChunk
         )
 
         try audioData.write(to: outputURL)

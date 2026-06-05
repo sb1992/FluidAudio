@@ -98,7 +98,7 @@ Use `OfflineDiarizerManager` when you need offline DER parity or want to run the
 
 `DiarizerTimeline` accumulates per-frame speaker probabilities and derives `DiarizerSpeaker` segments. Each speaker has `finalizedSegments` (confirmed) and `tentativeSegments` (may be revised). Segments expose `startTime`, `endTime`, `duration`, and `isFinalized`.
 
-**`DiarizerTimelineConfig`** controls post-processing (onset/offset thresholds default to 0.5, min segment/gap duration, optional rolling window cap). Both diarizers accept this at init.
+**`DiarizerTimelineConfig`** controls post-processing (onset/offset thresholds default to 0.5, min segment/gap duration, optional rolling window cap, and `storeSegments` for emit-only mode that skips creating `DiarizerSpeaker` objects entirely). Both diarizers accept this at init. See [DiarizerTimeline.md](Diarization/DiarizerTimeline.md#emit-only-mode-storesegments--false) for the emit-only mode contract.
 
 **Speaker Management:**
 - `upsertSpeaker(named:atIndex:) -> DiarizerSpeaker?`
@@ -134,11 +134,10 @@ try await diarizer.initialize(mainModelPath: modelURL)
 Streaming diarization using LS-EEND. Variable speaker slots, 8 kHz input, 100 ms frame duration, 20.7% DER on AMI SDM.
 
 ```swift
-let diarizer = LSEENDDiarizer(computeUnits: .cpuOnly)
-try await diarizer.initialize(variant: .dihard3)
+let diarizer = try await LSEENDDiarizer(variant: .dihard3)
 ```
 
-**Variants:** ami, callhome, dihard2, dihard3 (via `LSEENDModelDescriptor.loadFromHuggingFace(variant:)`).
+**Variants:** ami, callhome, dihard2, dihard3 (via `LSEENDModel.loadFromHuggingFace(variant:stepSize:)`). The optional `LSEENDStepSize` selects how many output frames the model commits per CoreML call (`.step100ms` … `.step500ms`); smaller steps reduce latency, larger steps raise throughput.
 
 Call `finalizeSession()` at end-of-stream to flush pending audio before reading the final timeline.
 
@@ -337,67 +336,64 @@ Qwen3-based speech recognition with Whisper mel spectrogram frontend.
 
 ## Text-to-Speech (TTS)
 
-### KokoroTtsManager
-Text-to-speech synthesis using Kokoro CoreML models.
+### KokoroAneManager
+ANE-resident Kokoro 82M — splits the graph into 7 CoreML stages so the
+ANE-friendly layers stay resident on the Neural Engine. **3-11× RTFx** on
+Apple Silicon. See [KokoroAne](TTS/KokoroAne.md) for the full pipeline.
 
 **Key Methods:**
-- `init(defaultVoice:defaultSpeakerId:directory:computeUnits:customLexicon:)`
-  - Create TTS manager with optional configuration
-  - `computeUnits`: Use `.cpuAndGPU` on iOS 26+ to avoid ANE issues
+- `init(defaultVoice:directory:computeUnits:modelStore:)`
+  - Defaults: `defaultVoice = "af_heart"`, `computeUnits = .default`
+    (per-stage assignment matching the laishere upstream)
 - `initialize(preloadVoices:) async throws`
-  - Download and initialize TTS models
-  - Optionally preload specific voices
-- `synthesize(text:voice:speakerId:speed:pitch:) async throws -> [Float]`
-  - Synthesize speech from text
-  - Returns audio samples at 24kHz
-- `synthesizeDetailed(text:voice:speakerId:speed:pitch:) async throws -> (audio: [Float], alignments: [AlignmentInfo])`
-  - Synthesize with phoneme-level timing information
-- `synthesizeToFile(text:outputURL:voice:speakerId:speed:pitch:) async throws`
-  - Synthesize directly to WAV file
-- `setDefaultVoice(_:speakerId:) async throws`
-  - Change default voice for subsequent synthesis
-- `setCustomLexicon(_:)`
-  - Set custom pronunciation dictionary
-- `cleanup()`
-  - Release models and free memory
-
-**Available Voices:**
-- `af` — American Female
-- `af_bella`, `af_nicole`, `af_sarah` — American Female variants
-- `am` — American Male
-- `am_adam`, `am_michael` — American Male variants
-- `bf` — British Female
-- `bm` — British Male
+  - Download (if missing) and load all 7 `.mlmodelc` bundles + `vocab.json`
+    + `af_heart.bin`
+- `synthesize(text:voice:speed:) async throws -> Data`
+  - One-shot text → 24 kHz mono 16-bit PCM WAV
+- `synthesizeDetailed(text:voice:speed:) async throws -> KokoroAneSynthesisResult`
+  - Returns samples + per-stage timings
+- `synthesizeFromPhonemes(_:voice:speed:) async throws -> Data`
+  - Bypass G2P; feed an already-IPA phoneme string directly
+- `synthesizeFromPhonemesDetailed(_:voice:speed:) async throws -> KokoroAneSynthesisResult`
+- `setDefaultVoice(_:)` — override default voice for subsequent calls
+- `isAvailable() async -> Bool`
+- `cleanup() async` — drop loaded mlmodelcs + voice packs
 
 **Configuration:**
-- `defaultVoice`: Voice identifier (default: `"af"`)
-- `defaultSpeakerId`: Speaker ID for multi-speaker voices (default: 0)
-- `speed`: Speech rate multiplier (0.5–2.0, default: 1.0)
-- `pitch`: Pitch shift in semitones (-12 to +12, default: 0)
-- `customLexicon`: Custom pronunciation dictionary
+- `defaultVoice`: voice id (default `"af_heart"` — only voice currently shipped)
+- `directory`: optional cache directory override
+- `computeUnits`: `KokoroAneComputeUnits` (per-stage `MLComputeUnits`)
+  - `.default` — Albert/PostAlbert/Alignment/Vocoder on `cpuAndNeuralEngine`,
+    Prosody/Noise/Tail on `.all`
+  - `.cpuAndGpu` — skip ANE entirely (debug baseline)
+- `speed`: speech rate multiplier (default `1.0`)
+
+**Limits:**
+- ≤ 510 IPA phonemes per call (no built-in chunker)
+- Single voice (`af_heart`)
+- No SSML / custom lexicon / markdown overrides
 
 **Usage:**
 ```swift
-let manager = KokoroTtsManager(defaultVoice: "af")
+let manager = KokoroAneManager()
 try await manager.initialize()
 
-let audio = try await manager.synthesize(
-    text: "Hello from FluidAudio!",
-    speed: 1.0,
-    pitch: 0
-)
+let wav = try await manager.synthesize(text: "Hello from FluidAudio!")
+try wav.write(to: URL(fileURLWithPath: "/tmp/demo.wav"))
 
-// Save to file
-try await manager.synthesizeToFile(
-    text: "Hello world",
-    outputURL: URL(fileURLWithPath: "output.wav")
-)
+// With per-stage timings:
+let detail = try await manager.synthesizeDetailed(text: "Hi.")
+print("samples: \(detail.samples.count) @ \(detail.sampleRate) Hz")
+let t = detail.timings
+print("  albert=\(t.albert) postAlbert=\(t.postAlbert) alignment=\(t.alignment)")
+print("  prosody=\(t.prosody) noise=\(t.noise) vocoder=\(t.vocoder) tail=\(t.tail)")
+print("  total: \(t.totalMs) ms")
 ```
 
 **Performance:**
-- Real-time factor: ~5-10x on Apple Silicon
-- Output sample rate: 24kHz
-- Supports SSML for prosody control
+- Real-time factor: 3-11× RTFx on Apple Silicon
+- Cold load (first ever, ANE compile): ~20 s; warm load: ~0.3 s
+- Output sample rate: 24 kHz
 
 ### PocketTtsManager
 Lightweight streaming TTS with voice cloning support.
